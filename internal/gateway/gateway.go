@@ -1223,6 +1223,16 @@ func catalogFor(r *http.Request) []provider.Entry {
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
+	// a Codex that names magpie its model_provider asks for
+	// <base_url>/models?client_version=<version> (codex-rs reads that query
+	// on a custom provider's models endpoint, and keeps the answer in its
+	// models_cache): it wants the catalog in Codex's own shape, the one
+	// /v1/codex/models is, not OpenAI's list (CLIProxy's unified models
+	// handler splits on the same query)
+	if r.URL.Query().Has("client_version") {
+		s.codexCatalog(w, r)
+		return
+	}
 	data := []map[string]any{}
 	shown := catalogFor(r)
 	if agent := agentOf(r); agent == "claude-desktop" {
@@ -1627,6 +1637,19 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			return
 		}
 		noteAsked(r.Context(), model)
+		// the sentinel an older magpie left in Codex's config as its model,
+		// which no provider resolves: the turn goes on the model the
+		// conversation is on instead, and only a conversation with none to
+		// fall back on is answered, before the route can look for a
+		// provider of its own
+		if from == provider.Responses && model == codexSentinel {
+			if to := s.codexSentinelModel(r, body); to != "" {
+				body, model = withModel(body, to), to
+			} else {
+				writeError(w, from, 400, codexSentinelNote())
+				return
+			}
+		}
 		// a thread Codex started on magpie, on one of Codex's own models
 		// magpie serves nothing for: on Codex's own sign-in, as the
 		// ChatGPT backend's route sends it (codexOwnOffMagpie)

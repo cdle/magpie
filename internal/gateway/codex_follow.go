@@ -33,6 +33,13 @@ var CodexSideSet func(which string) bool
 // codexLeadsCap bounds how many conversations codexLeads keeps.
 const codexLeadsCap = 512
 
+// codexSentinel is the placeholder an older magpie left in Codex's config
+// as its model, beside its ChatGPT sign-in. Codex sends it on every turn
+// of a conversation started then, and the ChatGPT backend refuses it
+// outright ("the 'provider' model is not supported when using Codex with a
+// ChatGPT account"), which magpie relayed back as the turn's error.
+const codexSentinel = "provider"
+
 // codexLeads is the model each Codex conversation's own turns last went
 // on, by its thread id, and the one any of them last went on, by the
 // gateway key it came with.
@@ -230,4 +237,40 @@ func (s *Server) servedSession(r *http.Request, to string) string {
 		return ""
 	}
 	return to
+}
+
+// codexSentinelModel is the model to serve a turn Codex sends on the
+// sentinel: the one the conversation's own turns last went on
+// (codexLeads), else the one Codex's config names (CodexSideModel), when
+// magpie can serve it to this caller now (servedSession). "" when there
+// is no such model to fall back to, and the turn is answered as an error
+// rather than relayed to ChatGPT, which refuses the sentinel without
+// naming a model the user can pick.
+//
+// A sentinel turn is a turn of a conversation of its own, so it follows
+// only a model tied to that conversation, not the one another
+// conversation of this key was last on (codexLeads.lookup's last, which
+// a side call takes): the conversation Codex started then had its turns
+// on the model it named at the time, and a conversation started since has
+// none of its own to follow yet, so it falls through to the config.
+func (s *Server) codexSentinelModel(r *http.Request, body []byte) string {
+	if m, tied, _ := s.codexLeads.lookup(r, body); tied && m != "" {
+		if to := s.servedSession(r, m); to != "" {
+			return to
+		}
+	}
+	if CodexSideModel != nil {
+		if to := s.servedSession(r, CodexSideModel()); to != "" {
+			return to
+		}
+	}
+	return ""
+}
+
+// codexSentinelNote is what a turn on the sentinel with no model to fall
+// back on is answered with: the line an older magpie left in Codex's
+// config, and the two ways to be rid of it.
+func codexSentinelNote() string {
+	return "Codex's config still names an old placeholder model (model = \"" +
+		codexSentinel + "\"): pick a model in magpie's panel, or remove that line from ~/.codex/config.toml"
 }

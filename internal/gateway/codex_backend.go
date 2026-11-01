@@ -109,6 +109,19 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, provider.Responses, 400, err.Error())
 			return
 		}
+		// the sentinel an older magpie left in Codex's config as its model,
+		// which the ChatGPT backend refuses outright: the turn goes on the
+		// model the conversation is on instead, and only a conversation
+		// with none to fall back on is answered, before it can be noted or
+		// lead a side call
+		if model == codexSentinel {
+			if to := s.codexSentinelModel(r, body); to != "" {
+				body, model = withModel(body, to), to
+			} else {
+				writeError(w, provider.Responses, 400, codexSentinelNote())
+				return
+			}
+		}
 		// the route that shows it while it is held before routing names
 		// it, as handle's and gemini's do (Jason on Discord: a held Codex
 		// turn showed as no model, "magpie · 0 on")

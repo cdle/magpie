@@ -133,6 +133,9 @@ func (p place) gw() string {
 
 func (p place) v1() string       { return p.gw() + "/v1" }
 func (p place) codexURL() string { return p.gw() + gateway.CodexPath }
+func (p place) catalogURL() string {
+	return p.gw() + gateway.CodexCatalogPath
+}
 
 // host is the gateway's host as the agent reaches it.
 func (p place) host() string {

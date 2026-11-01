@@ -616,6 +616,12 @@ func codexIn(at place) *Agent {
 			{Path: "name", Value: "magpie"},
 			{Path: "base_url", Value: at.v1()},
 			{Path: "wire_api", Value: "responses"},
+			// Codex 0.165 keeps an API-key provider without
+			// model_catalog_url off its own model discovery and falls back
+			// to its bundled OpenAI list, so the picker shows none of
+			// magpie's models. The catalog endpoint answers in Codex's own
+			// shape, under the same gateway key the requests take.
+			{Path: "model_catalog_url", Value: at.catalogURL()},
 			{Path: "experimental_bearer_token", Value: keptBearerToken("model_providers." + magpieID)},
 			// Codex offers its built-in image tool (image_gen.imagegen) and
 			// the other OpenAI-provider tools only to a provider it reads as
@@ -884,6 +890,7 @@ func codexIn(at place) *Agent {
 				edit.KV{Path: "name", Value: id},
 				edit.KV{Path: "base_url", Value: at.v1()},
 				edit.KV{Path: "wire_api", Value: "responses"},
+				edit.KV{Path: "model_catalog_url", Value: at.catalogURL()},
 				edit.KV{Path: "experimental_bearer_token", Value: keptBearerToken("model_providers." + id)},
 			); err != nil {
 				return err
@@ -1368,7 +1375,7 @@ func codexIn(at place) *Agent {
 				}
 				if err := edit.SetTOMLTop(path,
 					edit.KV{Path: "openai_base_url", Value: at.codexURL()},
-					edit.KV{Path: "model", Value: v},
+					// magpie no longer writes a model into config.toml
 				); err != nil {
 					return err
 				}
@@ -1399,7 +1406,7 @@ func codexIn(at place) *Agent {
 			kv := []edit.KV{
 				{Path: "model_provider", Value: magpieID},
 				{Path: "model_catalog_json", Value: catalogRef},
-				{Path: "model", Value: v},
+				// magpie no longer writes a model into config.toml
 			}
 			if u := get("openai_base_url"); u == "" || viaBase() {
 				kv = append(kv, edit.KV{Path: "openai_base_url", Value: at.codexURL()})
@@ -1429,23 +1436,19 @@ func codexIn(at place) *Agent {
 				}
 				if err := edit.SetTOMLTop(path,
 					edit.KV{Path: "openai_base_url", Value: at.codexURL()},
-					edit.KV{Path: "model", Value: v},
+					// magpie no longer writes a model into config.toml
 				); err != nil {
 					return err
 				}
 				return settle()
 			}
-			if err := edit.SetTOMLTop(path, edit.KV{Path: "model", Value: v}); err != nil {
-				return err
-			}
+			// magpie no longer writes a model into config.toml
 			return settle()
 		}
 		if _, err := unroute(); err != nil {
 			return err
 		}
-		if err := edit.SetTOMLTop(path, edit.KV{Path: "model", Value: v}); err != nil {
-			return err
-		}
+		// magpie no longer writes a model into config.toml
 		if err := failover(); err != nil {
 			return err
 		}
@@ -1472,7 +1475,7 @@ func codexIn(at place) *Agent {
 			switch {
 			case now != "" && !isMagpie(now):
 			case was != "" && !isMagpie(was):
-				err = edit.SetTOMLTop(path, edit.KV{Path: "model", Value: was})
+				// magpie no longer restores a model into config.toml
 			case isMagpie(get("model")):
 				err = edit.DelTOMLTop(path, "model")
 			}
@@ -1651,7 +1654,7 @@ func codexIn(at place) *Agent {
 					}
 					if err := edit.SetTOMLTop(path,
 						edit.KV{Path: "openai_base_url", Value: at.codexURL()},
-						edit.KV{Path: "model", Value: own},
+						// magpie no longer writes a model into config.toml
 					); err != nil {
 						return err
 					}
