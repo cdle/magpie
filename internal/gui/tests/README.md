@@ -12,6 +12,13 @@ checks that request hooks have no provider badge. `MAGPIE_GATEWAY_ASSETS` select
 an older asset directory for a failing regression comparison; user settings and
 live gateways are never accessed.
 
+`plugin-provider-options.test.cjs` checks the same JSON options editor on a
+provider plugin's Installed row (plugins#592: Devin's keep-alive interval and
+pings): shown when its package suggests options, starting from them; absent
+for a plugin with none and one switched off; Save and a confirmed Clear post
+through the real page, in all five languages, at 980px and 420px, on Chromium
+and WebKit. The API is faked.
+
 `settings-proxy-auth.test.cjs` checks a proxy's optional username and
 password in Settings, in fields of their own for SOCKS5/SOCKS5h, HTTP,
 HTTPS and bare host:port proxies alike, using the real page with isolated
@@ -337,6 +344,14 @@ leaving it off; Save posting each changed one by the plugin's provider id
 before the provider, and none switched back. Chromium and WebKit, 1100 and
 420 wide, every language.
 
+`plugin-option-words.test.cjs` checks a plugin option in the reader's
+language (plugins#590): its `labels`, `descriptions` and `confirms` by the
+window's language, zh-TW falling back to zh and the rest to the plain
+words; and, while a `filtersModels` switch is on as saved, the note under
+the Models field's chips that the list is filtered, inside the editor; off,
+none. A WorkBuddy moved onto its plugin, Chromium and WebKit, 1100 and 420
+wide, every language.
+
 `plugin-move-overflow.test.cjs` checks a Plugins card that offers a
 built-in's accounts: the button is one word beside the name, as Install is
 ("Move", its title saying whose accounts and how many), on one line, and it
@@ -371,6 +386,12 @@ why one didn't load, updates one and removes one. The add sheet's
 "More in Plugins" row (the providers list has no button of its own) and
 "look for a plugin" link lead there. English and Chinese, Chromium and WebKit,
 with the API faked.
+
+`plugin-npm-unknown.test.cjs` checks that a suggested plugin npm said
+nothing of (npm or the dist branch not read in time) offers Install, not
+Coming soon, and that the page asks again and then shows its version,
+while one npm said it doesn't have still reads Coming soon. Every
+language, Chromium and WebKit, wide and narrow, with the API faked.
 
 `plugins-more-discover.test.cjs` checks that the add sheet's "More in
 Plugins" row and its "look for a plugin" link open Plugins on Discover,
@@ -621,7 +642,7 @@ name. The groups' own New group has the plus too. No left-border accent.
 `name-suffix-where-named.test.cjs` checks the setting that says whether a
 provider's name or "· routing group" follows a name in the agents' lists (#868)
 where names are given, in Chromium and WebKit, English and Chinese. The
-provider editor's Names & levels has its three choices and says what the lists
+provider editor's Names, prices & levels has its three choices and says what the lists
 show. For the groups it is one setting for all of them, so it sits over the
 groups on Routing (PAMI on Discord: in one group's editor it read as that
 group's): a group's editor has no choices, only what its group will be called
@@ -1469,7 +1490,7 @@ Chromium and WebKit, English and Chinese: Detect APIs' "Each picked model"
 posts provider/detect with every model picked (detectModels) and shows model
 by API, each a ✓ with the time or a ✗ with why; "Use these" sets the URLs
 that answered and gives each model that answered on one API only that API in
-Names & levels, unsaved, sending nothing until the Save carries them as
+Names, prices & levels, unsaved, sending nothing until the Save carries them as
 modelPrefs, while a model answering on two stays Auto. A chip's right-click
 Test says the API it was asked on ("answered via Responses"). No click moves
 the page, nothing has a left-border accent, and every string has its

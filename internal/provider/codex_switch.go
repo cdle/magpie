@@ -304,6 +304,11 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 	if keep || !known || q.Error != "" || !q.Held && !usedPast(q, share, now) && !capped(from, q) {
 		return "", "", false, false
 	}
+	if agent == "codex" && !q.Held && !capped(from, q) && spendsFirst(from, q) {
+		// set to spend its credits before another account, and holding
+		// some: Codex stays on it (jojonas_xyz on X)
+		return "", "", false, false
+	}
 	users := make([]string, 0, len(spares))
 	for _, l := range spares {
 		users = append(users, l.User)
@@ -340,6 +345,13 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 		return from, best, false, true
 	}
 	return "", "", false, false
+}
+
+// spendsFirst says whether the Codex account user, read as q, is set to
+// spend its credits before another account (CodexCreditsFirst) and holds
+// some, as its windows say (QuotaWindow.Credits).
+func spendsFirst(user string, q SubscriptionQuota) bool {
+	return CodexCreditsFirst(user) && slices.ContainsFunc(q.Windows, func(w QuotaWindow) bool { return w.Credits })
 }
 
 // roomMargin is how much more room (roomLeft) an account past its line
@@ -452,7 +464,7 @@ func SwitchWhenSpent(ctx context.Context, agent string) (string, error) {
 	}
 	// the first moved off, not one moved to on the way
 	r, _ := loginReturnOf(agent, from)
-	if err := switchLogin(agent, to); err != nil {
+	if err := switchLoginBy(agent, to, true); err != nil {
 		return "", err
 	}
 	if back {
@@ -471,12 +483,18 @@ func SwitchWhenSpent(ctx context.Context, agent string) (string, error) {
 		share, _ := loginSwitching(agent)
 		log.Printf("%s: %s has used %g%% or more of its allowance; signed it in to %s", agent, from, share, to)
 		if agent == "codex" {
-			codexAppSpentSwitch()
+			codexAppSwitched(true, true)
 		}
 	}
 	if agent == "codex" {
 		if was := CodexAppStale(); was != "" {
-			log.Printf("codex: the Codex app is still signed in to %s, and shows its limits, until its app-server is restarted once no Codex turn runs", was)
+			// a switch off a spent account restarts it either way: left on
+			// that account, the app greys Send for every model
+			if codexRestartsApp() || !back {
+				log.Printf("codex: the Codex app is still signed in to %s, and shows its limits, until its app-server is restarted once no Codex turn runs", was)
+			} else {
+				log.Printf("codex: the Codex app is still signed in to %s, and shows its limits, until it is restarted: magpie restarts it for a switch back only with \"Restart the Codex app to follow\" on", was)
+			}
 		}
 	}
 	// the models the agent is offered are the new account's plan's
