@@ -5386,6 +5386,25 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
+	if p.ID == "xingchi" && to == provider.Responses {
+		// Xingchi counts a session's requests against the session
+		// ids the client sends (the session-id and x-session-id
+		// headers) and the body's prompt_cache_key: past its cap
+		// every later turn of that session is turned away ("this
+		// session has reached the limit of 100 requests"), however
+		// new the conversation otherwise is. A Responses request
+		// to Xingchi goes with none of the three, so each turn
+		// starts as its own session. This runs after Sign and
+		// every header put on above, so nothing puts them back;
+		// the body's session_id and every other provider are
+		// left exactly as they were.
+		req.Header.Del("Session-Id")
+		req.Header.Del("X-Session-Id")
+		if gjson.GetBytes(body, cacheKeyField).Exists() {
+			body = withoutFields(body, cacheKeyField)
+			provider.SetBody(req, body)
+		}
+	}
 	// a sign-in its vendor revoked isn't sent again: the next member is
 	// asked, and the agent told to sign in again (#1793)
 	if why, ok := provider.RevokedSignIn(p.Account, req); ok {
