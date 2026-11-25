@@ -5402,8 +5402,9 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		req.Header.Del("X-Session-Id")
 		if gjson.GetBytes(body, cacheKeyField).Exists() {
 			body = withoutFields(body, cacheKeyField)
-			provider.SetBody(req, body)
 		}
+		body = xingchiPackBody(req.Header, body)
+		provider.SetBody(req, body)
 	}
 	// a sign-in its vendor revoked isn't sent again: the next member is
 	// asked, and the agent told to sign in again (#1793)

@@ -22,6 +22,20 @@ message digest is not migrated to a newly recognised native id, so the first
 request after upgrading can choose an account anew. Historical usage is not
 backfilled; see [Gateway Session Aggregation](gateway-sessions.md).
 
+For Xingchi Responses, `forwardOnce` packs history after input expansion and
+before sending upstream (`xingchiPackBody` in
+[`xingchi_pack.go`](../../internal/gateway/xingchi_pack.go)). Older turns become
+one developer transcript with a stable prefix and checksum trailer; ten complete
+recent turns and the current turn keep their native items. Local history remains
+canonical and unpacked. Old images become digest placeholders, reasoning is
+excluded, and old tool output is capped. Above the 60k estimated-token budget,
+the oldest packed entries are omitted with an explicit loss marker. A valid
+packed input is expanded before repacking; an invalid checksum leaves it intact.
+The session-header and prompt-cache-key removal still applies. Other providers
+and Chat requests do not enter this path. Regression coverage is in
+[`xingchi_pack_test.go`](../../internal/gateway/xingchi_pack_test.go) and
+[`xingchi_session_test.go`](../../internal/gateway/xingchi_session_test.go).
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |
