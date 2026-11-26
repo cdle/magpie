@@ -5,16 +5,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 )
 
 const (
-	xingchiPackMarker    = "[magpie-packed v1]"
-	xingchiPackTurns     = 10
-	xingchiPackTokenCap  = 60_000
-	xingchiToolTextLimit = 4_000
+	xingchiPackMarker         = "[magpie-packed v1]"
+	xingchiPackTurns          = 10
+	xingchiPackAssistantLimit = 50
+	xingchiPackTokenCap       = 60_000
+	xingchiToolTextLimit      = 4_000
 )
 
 type xingchiPackTurn struct {
@@ -32,8 +34,8 @@ var xingchiPackCache = struct {
 	byThread map[string]xingchiPackState
 }{byThread: map[string]xingchiPackState{}}
 
-// xingchiPackBody preserves the latest ten old turns plus the current turn as
-// native Responses items and folds earlier turns into a developer message.
+// xingchiPackBody keeps a recent suffix of model turns as native Responses
+// items, within a hard assistant-item budget, and packs the older history.
 // It is called only on the Xingchi Responses route, at the final upstream
 // boundary, so local conversation and transcript storage remain untouched.
 func xingchiPackBody(in http.Header, body []byte) []byte {
@@ -47,13 +49,26 @@ func xingchiPackBody(in http.Header, body []byte) []byte {
 	}
 	items = xingchiUnpackInput(items)
 	prefix, turns, ok := xingchiTurns(items)
-	if !ok || len(turns) <= xingchiPackTurns+1 {
+	if !ok {
 		return body
 	}
 
-	old := turns[:len(turns)-xingchiPackTurns-1]
-	recent := turns[len(turns)-xingchiPackTurns-1 : len(turns)-1]
-	current := turns[len(turns)-1]
+	// Retain at most ten previous model turns and the current one. A single
+	// turn may fan out to many tools, so the window alone is not a budget.
+	// Move an oversized turn whole: never leave its results without calls.
+	cut, assistantItems := len(turns), 0
+	for cut > 0 && len(turns)-cut < xingchiPackTurns+1 {
+		n := xingchiAssistantItems(turns[cut-1].items)
+		if assistantItems+n > xingchiPackAssistantLimit {
+			break
+		}
+		assistantItems += n
+		cut--
+	}
+	if cut == 0 {
+		return body
+	}
+	old, recent := turns[:cut], turns[cut:]
 	packed := xingchiPackText(xingchiPackKey(in, items), old)
 	if packed == "" {
 		return body
@@ -68,7 +83,6 @@ func xingchiPackBody(in http.Header, body []byte) []byte {
 	for _, t := range recent {
 		out = append(out, t.items...)
 	}
-	out = append(out, current.items...)
 	q["input"], err = json.Marshal(out)
 	if err != nil {
 		return body
@@ -77,34 +91,78 @@ func xingchiPackBody(in http.Header, body []byte) []byte {
 	if err != nil {
 		return body
 	}
+	log.Printf("xingchi: pack items=%d->%d assistant_items=%d->%d turns=%d", len(items), len(out), xingchiAssistantItems(items), xingchiAssistantItems(out), len(old))
 	return encoded
 }
 
-// xingchiTurns starts a turn at each user message. The tool calls and results
-// following a user message stay with that turn until the next user message.
-// Request instructions before the first user message stay outside the pack.
+// xingchiTurns splits at user inputs and subsequent model iterations, even
+// when an agent runs many times for a single user input. Parallel calls and
+// their outputs stay together; leading instructions stay outside the pack.
 func xingchiTurns(items []json.RawMessage) ([]json.RawMessage, []xingchiPackTurn, bool) {
-	first := -1
-	for i, raw := range items {
-		if xingchiItemRole(raw) == "user" {
-			first = i
+	first := 0
+	for first < len(items) {
+		role := xingchiItemRole(items[first])
+		if role != "system" && role != "developer" {
 			break
 		}
+		first++
 	}
-	if first < 0 {
+	if first == len(items) {
 		return nil, nil, false
 	}
 	prefix := append([]json.RawMessage(nil), items[:first]...)
 	var turns []xingchiPackTurn
 	start := first
-	for i := first + 1; i < len(items); i++ {
-		if xingchiItemRole(items[i]) == "user" {
+	assistant, output := false, false
+	pending := map[string]bool{}
+	for i := first; i < len(items); i++ {
+		var item struct {
+			Type   string `json:"type"`
+			Role   string `json:"role"`
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal(items[i], &item) != nil {
+			return nil, nil, false
+		}
+		role := item.Role
+		if item.Type != "" && item.Type != "message" {
+			role = ""
+		}
+		call := item.Type == "function_call" || item.Type == "custom_tool_call"
+		next := assistant && len(pending) == 0 && (role == "assistant" || item.Type == "reasoning" || call && output)
+		if i > start && (role == "user" || next) {
 			turns = append(turns, xingchiMakePackTurn(items[start:i]))
 			start = i
+			assistant, output = false, false
+			clear(pending)
+		}
+		if role == "assistant" || call {
+			assistant = true
+		}
+		if call {
+			pending[item.CallID] = true
+		}
+		if item.Type == "function_call_output" || item.Type == "custom_tool_call_output" {
+			delete(pending, item.CallID)
+			output = true
 		}
 	}
 	turns = append(turns, xingchiMakePackTurn(items[start:]))
 	return prefix, turns, true
+}
+
+func xingchiAssistantItems(items []json.RawMessage) int {
+	n := 0
+	for _, raw := range items {
+		var item struct {
+			Type string `json:"type"`
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(raw, &item) == nil && ((item.Type == "" || item.Type == "message") && item.Role == "assistant" || item.Type == "function_call" || item.Type == "custom_tool_call") {
+			n++
+		}
+	}
+	return n
 }
 
 func xingchiMakePackTurn(items []json.RawMessage) xingchiPackTurn {
@@ -333,6 +391,14 @@ func xingchiUnpackMessage(text string) ([]json.RawMessage, bool) {
 	}
 	var out []json.RawMessage
 	for _, line := range strings.Split(payload[start+1:], "\n") {
+		// Calls and results in v1 packs put their JSON after the role on
+		// the same line. Message JSON is on the following line.
+		if strings.HasPrefix(line, "--- turn ") {
+			parts := strings.SplitN(line, " | ", 3)
+			if len(parts) == 3 {
+				line = parts[2]
+			}
+		}
 		if !strings.HasPrefix(line, "{") || !json.Valid([]byte(line)) {
 			continue
 		}

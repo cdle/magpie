@@ -2,13 +2,17 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 func xingchiPackFixture(turns int) []byte {
@@ -157,5 +161,196 @@ func TestXingchiPackOmitsOldImagesAndReasoning(t *testing.T) {
 	}
 	if !strings.Contains(string(packed), "[image omitted: sha256=") {
 		t.Fatal("old image has no placeholder")
+	}
+}
+
+func xingchiAgentFixture(iterations, calls int, user bool) []byte {
+	items := []map[string]any{{"type": "message", "role": "developer", "content": "keep instructions"}}
+	if user {
+		items = append(items, map[string]any{"type": "message", "role": "user", "content": "one initial request"})
+	}
+	for i := 0; i < iterations; i++ {
+		items = append(items, map[string]any{"type": "message", "role": "assistant", "content": fmt.Sprintf("iteration-%03d", i)})
+		for j := 0; j < calls; j++ {
+			items = append(items, map[string]any{"type": "function_call", "call_id": fmt.Sprintf("call-%d-%d", i, j), "name": "probe", "arguments": fmt.Sprintf(`{"iteration":%d}`, i)})
+		}
+		for j := 0; j < calls; j++ {
+			items = append(items, map[string]any{"type": "function_call_output", "call_id": fmt.Sprintf("call-%d-%d", i, j), "output": fmt.Sprintf("result-%d-%d", i, j)})
+		}
+	}
+	body, _ := json.Marshal(map[string]any{"input": items, "model": "gpt-6.1-sol"})
+	return body
+}
+
+func xingchiTestAssistantItems(items []json.RawMessage) int {
+	n := 0
+	for _, raw := range items {
+		if gjson.GetBytes(raw, "role").String() == "assistant" || gjson.GetBytes(raw, "type").String() == "function_call" || gjson.GetBytes(raw, "type").String() == "custom_tool_call" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestXingchiPackAgentHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		iterations, calls int
+		user              bool
+	}{
+		{"single-user", 110, 1, true},
+		{"parallel-tools", 15, 8, true},
+		{"oversized-latest-iteration", 1, 60, true},
+		{"assistant-only", 110, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := xingchiAgentFixture(tc.iterations, tc.calls, tc.user)
+			packed := xingchiPackBody(http.Header{"Thread-Id": {t.Name()}}, body)
+			items := packedInput(t, packed)
+			if bytes.Equal(body, packed) || strings.Count(string(packed), xingchiPackMarker) != 1 {
+				t.Fatal("agent history must produce exactly one pack")
+			}
+			if n := xingchiTestAssistantItems(items); n > 50 {
+				t.Fatalf("wire assistant items = %d, want <=50", n)
+			}
+			if string(items[0]) != string(packedInput(t, body)[0]) {
+				t.Fatal("leading instructions changed")
+			}
+			if tc.iterations > 1 && !bytes.Contains(items[len(items)-1], []byte(fmt.Sprintf("%d", tc.iterations-1))) {
+				t.Fatal("latest iteration did not stay native")
+			}
+			calls := map[string]bool{}
+			for _, raw := range items {
+				switch gjson.GetBytes(raw, "type").String() {
+				case "function_call":
+					calls[gjson.GetBytes(raw, "call_id").String()] = true
+				case "function_call_output":
+					if !calls[gjson.GetBytes(raw, "call_id").String()] {
+						t.Fatal("native tool result lost its call")
+					}
+				}
+			}
+			unpacked := xingchiUnpackInput(items)
+			original := packedInput(t, body)
+			if len(unpacked) != len(original) {
+				t.Fatalf("round trip items = %d, want %d", len(unpacked), len(original))
+			}
+			for i := range original {
+				if !bytes.Equal(unpacked[i], original[i]) {
+					t.Fatalf("round trip item %d changed: %s", i, unpacked[i])
+				}
+			}
+			again := xingchiPackBody(http.Header{"Thread-Id": {t.Name()}}, packed)
+			if !bytes.Equal(again, packed) || strings.Count(string(again), xingchiPackMarker) != 1 {
+				t.Fatal("repacking nested a pack or lost tool history")
+			}
+		})
+	}
+}
+
+func TestXingchiPackAssistantBudgetBoundary(t *testing.T) {
+	for _, calls := range []int{49, 50} {
+		body := xingchiAgentFixture(1, calls, true)
+		got := xingchiPackBody(http.Header{"Thread-Id": {t.Name()}}, body)
+		if calls == 49 && !bytes.Equal(got, body) {
+			t.Fatal("50 assistant items should remain native")
+		}
+		if calls == 50 && (bytes.Equal(got, body) || xingchiTestAssistantItems(packedInput(t, got)) > 50) {
+			t.Fatal("51 assistant items must be packed into budget")
+		}
+	}
+}
+
+func TestXingchiPackAgentStablePrefix(t *testing.T) {
+	in := http.Header{"Thread-Id": {t.Name()}}
+	first := xingchiPackBody(in, xingchiAgentFixture(60, 1, true))
+	second := xingchiPackBody(in, xingchiAgentFixture(61, 1, true))
+	a := gjson.GetBytes(first, "input.1.content").String()
+	b := gjson.GetBytes(second, "input.1.content").String()
+	trailer := strings.LastIndex(a, "\n[magpie-packed end turns=")
+	if trailer < 0 || !strings.HasPrefix(b, a[:trailer+1]) {
+		t.Fatal("agent pack rewrote its earlier prefix")
+	}
+}
+
+func TestXingchiPackBadAgentChecksumIsOrdinaryText(t *testing.T) {
+	body := xingchiPackBody(http.Header{"Thread-Id": {t.Name()}}, xingchiAgentFixture(60, 1, true))
+	items := packedInput(t, body)
+	var pack map[string]any
+	if len(items) < 2 || json.Unmarshal(items[1], &pack) != nil {
+		t.Fatal("missing pack")
+	}
+	text, _ := pack["content"].(string)
+	if !strings.HasPrefix(text, xingchiPackMarker+"\n") {
+		t.Fatal("missing agent sentinel")
+	}
+	pack["content"] = strings.Replace(text, "iteration-000", "tampered", 1)
+	broken, _ := json.Marshal(pack)
+	got := xingchiUnpackInput([]json.RawMessage{broken})
+	if len(got) != 1 || !bytes.Equal(got[0], broken) {
+		t.Fatal("checksum mismatch must preserve ordinary developer text")
+	}
+}
+
+func TestXingchiPackToolOnlyIterations(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		items := packedInput(t, xingchiAgentFixture(110, 1, true))
+		var input []json.RawMessage
+		for _, item := range items {
+			if gjson.GetBytes(item, "role").String() == "assistant" {
+				continue
+			}
+			if custom {
+				item = bytes.ReplaceAll(item, []byte(`"function_call`), []byte(`"custom_tool_call`))
+			}
+			input = append(input, item)
+		}
+		body, _ := json.Marshal(map[string]any{"input": input})
+		got := packedInput(t, xingchiPackBody(http.Header{}, body))
+		if n := xingchiTestAssistantItems(got); n != 11 {
+			t.Fatalf("custom=%v: native calls=%d, want 11 recent iterations", custom, n)
+		}
+		if n := len(xingchiUnpackInput(got)); n != len(input) {
+			t.Fatalf("custom=%v: unpacked %d items, want %d", custom, n, len(input))
+		}
+	}
+}
+
+func TestForwardOncePacksOnlyXingchiResponses(t *testing.T) {
+	body := xingchiAgentFixture(110, 1, true)
+	for _, tc := range []struct {
+		id       string
+		protocol provider.Protocol
+		path     string
+		pack     bool
+	}{
+		{"xingchi", provider.Responses, "/responses", true},
+		{"other", provider.Responses, "/responses", false},
+		{"xingchi", provider.Chat, "/chat/completions", false},
+	} {
+		t.Run(tc.id+tc.path, func(t *testing.T) {
+			captured := make(chan []byte, 1)
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				captured <- b
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{}`)
+			}))
+			defer up.Close()
+			p := provider.Provider{ID: tc.id, Responses: up.URL + "/v1", Chat: up.URL + "/v1", Key: "fixture-key"}
+			res, err := New().forwardOnce(context.Background(), p, tc.protocol, tc.path, body, http.Header{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res.Body.Close()
+			wire := <-captured
+			if tc.pack {
+				if !bytes.Contains(wire, []byte(xingchiPackMarker)) || xingchiTestAssistantItems(packedInput(t, wire)) > 50 {
+					t.Fatal("final upstream boundary did not pack agent input into budget")
+				}
+			} else if !bytes.Equal(wire, body) {
+				t.Fatal("another route changed the original input")
+			}
+		})
 	}
 }
